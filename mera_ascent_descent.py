@@ -28,7 +28,11 @@ TODO:
 
 --- Usage example ---
 
-python mera_ascent_descent.py --L 16 --J 1.0 --g 1.0 --steps 100 --tries 10 --route ascent
+python mera_ascent_descent.py --L 16 --J 1.0 --g 1.0 --steps 50 --tries 10 --route ascent
+
+Compare with the energy via descent (this will be very slow for L=16 due to full state construction):
+
+python mera_ascent_descent.py --L 16 --J 1.0 --g 1.0 --steps 50 --tries 10 --route descent
 """
 
 
@@ -159,13 +163,29 @@ def apply_twoqubit_gate_state(psi, U, i):
     Returns: new state psi' with U applied at (i,i+1)
     """
     n = psi.ndim
-    axes = (i, i+1) + tuple(k for k in range(n) if k not in (i, i+1)) # bring (i,i+1) to front
-    inv = np.argsort(axes) # to restore order later
-    phi = np.transpose(psi, axes=axes).reshape(2,2,-1)     # (2,2,R) where R=2^(L-2)
-    U4 = U.reshape(2,2,2,2)                             # (a,b,ap,bp)
-    out = np.tensordot(U4, phi, axes=([2,3],[0,1]))        # (2,2,R)
-    out = out.reshape((2,2) + phi.shape[2:]) # (2,2,2,2,...,2)
-    out = np.transpose(out, axes=inv) # restore original order
+
+    rest_axes = [k for k in range(n) if k not in (i, i+1)]
+    axes = (i, i+1) + tuple(rest_axes)
+    inv = np.argsort(axes)
+
+    rest_shape = tuple(psi.shape[k] for k in rest_axes)   # all 2s, but keep them explicit
+    phi = np.transpose(psi, axes=axes).reshape(2, 2, -1)   # (2,2,R) where R=2^(L-2)
+
+    U4 = U.reshape(2,2,2,2)
+    out = np.tensordot(U4, phi, axes=([2,3],[0,1]))       # (2,2,R)
+    out = out.reshape((2,2) + rest_shape)                 # (2,2,2,2,...)
+    #print(f"apply_twoqubit_gate_state: applied U at sites ({i},{i+1}), psi.shape={psi.shape} -> out.shape={out.shape}")
+    out = np.transpose(out, axes=inv)
+
+    # axes = (i, i+1) + tuple(k for k in range(n) if k not in (i, i+1)) # bring (i,i+1) to front
+    # inv = np.argsort(axes) # to restore order later
+    # phi = np.transpose(psi, axes=axes).reshape(2,2,-1)     # (2,2,R) where R=2^(L-2)
+    # print(f"phi.shape after transpose and reshape: {phi.shape}")
+    # U4 = U.reshape(2,2,2,2)                             # (a,b,ap,bp)
+    # out = np.tensordot(U4, phi, axes=([2,3],[0,1]))        # (2,2,R)
+    # out = out.reshape((2,2) + phi.shape[2:]) # (2,2,2,2,...,2)
+    # print(f"apply_twoqubit_gate_state: applied U at sites ({i},{i+1}), psi.shape={psi.shape} -> out.shape={out.shape}")
+    # out = np.transpose(out, axes=inv) # restore original order
     return out
 
 def apply_isometry_expand_state(psi, W, s):
@@ -201,8 +221,9 @@ def descend_state(U, W, t, L):
             psi = apply_isometry_expand_state(psi, W, 2*s)     # expand 1->2 at each site
         Ut = U.conj().T
         n2 = psi.ndim # number of sites after expansion
-        offset = 0 if (ell % 2 == 0) else 1 # staggered pattern of disentanglers. Need to offset by 1 on odd layers so that disentanglers always act on (even,odd) pairs 
-        for i in range(offset, n2-1, 2):
+        #offset = 0 if (ell % 2 == 0) else 1 # staggered pattern of disentanglers. Need to offset by 1 on odd layers so that disentanglers always act on (even,odd) pairs 
+        #print("Layer", ell+1, "applying disentanglers at sites starting from", offset)
+        for i in range(0, n2-1, 2):
             psi = apply_twoqubit_gate_state(psi, Ut, i)
         psi = psi / norm(psi.ravel()) # normalize to avoid numerical issues
     return psi
@@ -278,8 +299,13 @@ def project_unitary(M):
     """
     Project a general complex matrix M onto the nearest unitary matrix U.
     The polar decomposition gives you the closest unitary in Frobenius norm sense.
+
+    Args:
+      M: (n,n) complex matrix
+    Returns:
+      U: (n,n) unitary matrix
     """
-    Uu, H = polar(M)  # polar decompose M. U is a unitary matrix whilst H is hermitian positive-semidefinite. This is like a matrix version of the complex number decomposition z = exp(i*theta)*r 
+    Uu, H = polar(M)  # polar decompose M as M = Uu H with Uu unitary, H Hermitian positive semidefinite. This is like a matrix version of the complex number decomposition z = exp(i*theta)*r 
     det = np.linalg.det(Uu)
     if abs(det) > 1e-12:
         Uu = Uu / (det**(1/4)) # divide by det^(1/4) as for an nxn matrix det(cA)=c^n det(A)
@@ -289,6 +315,11 @@ def project_isometry(W):
     """
     Project a general complex matrix W onto the nearest isometry V (V†V=I).
     QR decomposition achieves this in the same Frobenius norm sense as above.
+
+    Args:
+      W: (m,n) complex matrix with m >= n
+    Returns:
+      V: (m,n) isometry (V†V=I)
     """
     Q, R = np.linalg.qr(W)
     return Q[:, :W.shape[1]]
@@ -372,7 +403,7 @@ def energy(U, W, t, L, J=1.0, g=1.0, pbc=False, route="descent"):
 # Optimizer 
 def optimize(U, W, t, L, J=1.0, g=1.0, pbc=False,
              steps=140, tries=15, epsU=0.12, epsW=0.12, epst=0.12,
-             decay=0.985, seed=10, route="descent"):
+             decay=0.95, seed=10, route="descent"):
     """
     Optimize the tensors U, W, t to minimize the TFIM energy via random
     perturbations and selection. We use a simple adaptive scheme to adjust
@@ -413,15 +444,13 @@ def optimize(U, W, t, L, J=1.0, g=1.0, pbc=False,
                 e_best, Ub, Wb, tb = e, U_try, W_try, t_try
                 improved = True
         # decay (or increase) perturbation sizes depending on improvement
-        epsU *= decay
-        epsW *= decay
-        epst *= decay
+
         if (it+1) % 10 == 0:
             print(f"iter {it+1:3d}  E={e_best:.6f}")
         if not improved:
-            epsU *= 1.05
-            epsW *= 1.05
-            epst *= 1.05
+            epsU /= decay
+            epsW /= decay
+            epst /= decay
     return Ub, Wb, tb, e_best
 
 
